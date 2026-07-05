@@ -3,6 +3,7 @@ package com.touchgrass.mod;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.EntityType;
+import net.minecraft.entity.SpawnReason;
 import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.CatEntity;
 import net.minecraft.entity.passive.IronGolemEntity;
@@ -69,7 +70,7 @@ public class ModeManager {
     // -------------------------------------------------------------------------
 
     public static boolean isInForcedMode(ServerPlayerEntity player) {
-        return player.getScoreboardTags().contains(MODE_TAG);
+        return player.getCommandTags().contains(MODE_TAG);
     }
 
     public static void enterForcedMode(ServerPlayerEntity player) {
@@ -99,9 +100,11 @@ public class ModeManager {
                 PLATFORM_ORIGIN.getX() + 0.5,
                 PLATFORM_ORIGIN.getY() + 1,
                 PLATFORM_ORIGIN.getZ() + 0.5,
-                180F, 0F);
+                Collections.emptySet(),
+                180F, 0F,
+                false);
 
-        player.addScoreboardTag(MODE_TAG);
+        player.addCommandTag(MODE_TAG);
         player.changeGameMode(GameMode.ADVENTURE); // no block breaking/placing
         remainingTicks.put(player.getUuid(),
                 TouchGrassConfig.INSTANCE.forcedModeDurationMinutes * TICKS_PER_MINUTE);
@@ -124,7 +127,7 @@ public class ModeManager {
         // Background music — configurable vanilla registry id, never a bundled file.
         SoundEvent music = Registries.SOUND_EVENT.get(
                 Identifier.of(TouchGrassConfig.INSTANCE.musicEventId));
-        if (music == null) music = SoundEvents.MUSIC_OVERWORLD_MEADOW;
+        if (music == null) music = SoundEvents.MUSIC_OVERWORLD_MEADOW.value();
         scene.playSound(null, PLATFORM_ORIGIN, music, SoundCategory.MUSIC, 1.0F, 1.0F);
 
         // Gentle water ambience on entry.
@@ -168,7 +171,7 @@ public class ModeManager {
         PlayerState state = saved.remove(id);
         remainingTicks.remove(id);
         golemLineIndex.remove(id);
-        player.removeScoreboardTag(MODE_TAG);
+        player.removeCommandTag(MODE_TAG);
         setHudHidden(player, false);
 
         if (state != null) {
@@ -181,7 +184,9 @@ public class ModeManager {
                         state.pos().getX() + 0.5,
                         state.pos().getY(),
                         state.pos().getZ() + 0.5,
-                        state.yaw(), state.pitch());
+                        Collections.emptySet(),
+                        state.yaw(), state.pitch(),
+                        false);
             }
             player.changeGameMode(state.mode());
         }
@@ -266,9 +271,9 @@ public class ModeManager {
                 spawned.computeIfAbsent(player.getUuid(), k -> new ArrayList<>());
 
         // Spread animals out around the player so they can wander freely.
-        WolfEntity   dog    = EntityType.WOLF.create(world);
-        CatEntity    cat    = EntityType.CAT.create(world);
-        ParrotEntity parrot = EntityType.PARROT.create(world);
+        WolfEntity   dog    = EntityType.WOLF.create(world, SpawnReason.TRIGGERED);
+        CatEntity    cat    = EntityType.CAT.create(world, SpawnReason.TRIGGERED);
+        ParrotEntity parrot = EntityType.PARROT.create(world, SpawnReason.TRIGGERED);
 
         int[][] offsets = {{-3, 2}, {3, 2}, {0, -3}};
         int i = 0;
@@ -280,7 +285,7 @@ public class ModeManager {
                     PLATFORM_ORIGIN.getY() + 1,
                     PLATFORM_ORIGIN.getZ() + off[1],
                     (float) RANDOM.nextInt(360), 0F);
-            mob.addScoreboardTag(ILLUSION_TAG);
+            mob.addCommandTag(ILLUSION_TAG);
             if (mob instanceof TameableEntity tameable) {
                 // Cosmetic tame — bypasses the feeding mechanic so it persists
                 // exactly as set and vanishes cleanly when the mode ends.
@@ -295,7 +300,7 @@ public class ModeManager {
         // Have each animal immediately drift toward the player at a relaxed walk.
         for (var entity : list) {
             if (entity instanceof net.minecraft.entity.mob.MobEntity mob) {
-                mob.getNavigation().startMovingToEntity(player, 0.5);
+                mob.getNavigation().startMovingTo(player, 0.5);
             }
         }
     }
@@ -321,7 +326,12 @@ public class ModeManager {
                 tameable.getLookControl().lookAt(player, 30F, 30F);
             } else {
                 tameable.setSitting(false);
-                SoundEvent sound = tameable.getAmbientSound();
+                SoundEvent sound =
+                        tameable instanceof WolfEntity ? SoundEvents.ENTITY_WOLF_AMBIENT :
+                        tameable instanceof CatEntity ? SoundEvents.ENTITY_CAT_AMBIENT :
+                        tameable instanceof ParrotEntity ? SoundEvents.ENTITY_PARROT_AMBIENT :
+                        null;
+
                 if (sound != null) {
                     world.playSound(null, tameable.getBlockPos(),
                             sound, SoundCategory.NEUTRAL, 1.0F,
@@ -330,15 +340,15 @@ public class ModeManager {
             }
         } else if (distSq < 100) {  // 5–10 blocks — saunter back
             tameable.setSitting(false);
-            tameable.getNavigation().startMovingToEntity(player, 0.45);
+            tameable.getNavigation().startMovingTo(player, 0.45);
         } else {                     // wandered far — trot back a bit faster
             tameable.setSitting(false);
-            tameable.getNavigation().startMovingToEntity(player, 0.7);
+            tameable.getNavigation().startMovingTo(player, 0.7);
         }
     }
 
     private static void spawnGolem(ServerWorld world, ServerPlayerEntity player) {
-        IronGolemEntity golem = EntityType.IRON_GOLEM.create(world);
+        IronGolemEntity golem = EntityType.IRON_GOLEM.create(world, SpawnReason.TRIGGERED);
         if (golem == null) return;
         golem.refreshPositionAndAngles(
                 PLATFORM_ORIGIN.getX() + 1,
@@ -347,7 +357,7 @@ public class ModeManager {
                 180F, 0F);
         golem.setCustomName(Text.literal("§2Grass Golem"));
         golem.setCustomNameVisible(true);
-        golem.addScoreboardTag(ILLUSION_TAG);
+        golem.addCommandTag(ILLUSION_TAG);
         golem.setPlayerCreated(true); // stops it wandering off to guard a village
         world.spawnEntity(golem);
         spawned.computeIfAbsent(player.getUuid(), k -> new ArrayList<>()).add(golem);

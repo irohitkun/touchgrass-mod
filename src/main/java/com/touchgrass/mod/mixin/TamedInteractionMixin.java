@@ -24,7 +24,7 @@ public class TamedInteractionMixin {
     private void touchgrass$blockRealTaming(PlayerEntity player, Hand hand,
                                              CallbackInfoReturnable<ActionResult> cir) {
         TameableEntity self = (TameableEntity) (Object) this;
-        if (self.getScoreboardTags().contains(ModeManager.ILLUSION_TAG)) {
+        if (self.getCommandTags().contains(ModeManager.ILLUSION_TAG)) {
             // PASS = inert: no taming, no sit-toggle, no breeding.
             cir.setReturnValue(ActionResult.PASS);
         }
