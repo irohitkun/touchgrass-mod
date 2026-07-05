@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "package": "com.touchgrass.mod.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "PlayerAttackMixin",
+    "TamedInteractionMixin"
+  ],
+  "client": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

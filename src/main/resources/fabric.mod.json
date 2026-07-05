@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "touchgrass",
+  "version": "${version}",
+  "name": "Touch Grass Mode",
+  "description": "Forces a mandatory outdoor sunset break after too much playtime.",
+  "authors": ["you"],
+  "contact": {},
+  "license": "MIT",
+  "icon": "assets/touchgrass/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["com.touchgrass.mod.TouchGrassMod"],
+    "client": ["com.touchgrass.mod.TouchGrassClient"]
+  },
+  "mixins": ["touchgrass.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "fabric-api": "*",
+    "minecraft": "~1.21.2"
+  }
+}
