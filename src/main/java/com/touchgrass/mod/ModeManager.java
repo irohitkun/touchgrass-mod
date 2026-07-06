@@ -21,7 +21,9 @@ import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.GameMode;
+import net.minecraft.world.Heightmap;
 
 import java.util.*;
 
@@ -44,6 +46,22 @@ public class ModeManager {
     // Scene origin in the dedicated dimension. Fixed coords never collide with
     // anything a player has built because this dimension is only for this purpose.
     private static final BlockPos PLATFORM_ORIGIN = new BlockPos(0, 5, 0);
+
+    private static BlockPos getSceneOrigin(ServerWorld scene) {
+        int x = PLATFORM_ORIGIN.getX();
+        int z = PLATFORM_ORIGIN.getZ();
+
+        ChunkPos chunkPos = new ChunkPos(new BlockPos(x, 0, z));
+        scene.getChunk(chunkPos.x, chunkPos.z);
+
+        int y = scene.getTopY(
+                Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
+                x,
+                z
+        );
+
+        return new BlockPos(x, y, z);
+    }
 
     private static final int  TICKS_PER_MINUTE = 20 * 60;
     private static final Random RANDOM = new Random();
@@ -91,15 +109,21 @@ public class ModeManager {
             return;
         }
 
-        ensureSceneBuilt(scene);
+        // Find the generated terrain surface before building the scene.
+        BlockPos sceneOrigin = getSceneOrigin(scene);
+        System.out.println("[touchgrass] DEBUG sceneOrigin = " + sceneOrigin
+                + ", bottomY = " + scene.getBottomY()
+                + ", topY = " + scene.getTopYInclusive());
+        // ensureSceneBuilt temporarily disabled while testing natural terrain
+
         // Lock clear weather for the duration — no rain breaking the mood.
         scene.setWeather(0, 6000 * 20, false, false);
 
-        // Face the player outward toward the sea (south, toward positive Z).
+        // Face the player south.
         player.teleport(scene,
-                PLATFORM_ORIGIN.getX() + 0.5,
-                PLATFORM_ORIGIN.getY() + 1,
-                PLATFORM_ORIGIN.getZ() + 0.5,
+                sceneOrigin.getX() + 0.5,
+                sceneOrigin.getY(),
+                sceneOrigin.getZ() + 0.5,
                 Collections.emptySet(),
                 180F, 0F,
                 false);
@@ -213,13 +237,13 @@ public class ModeManager {
      *   -8..4   grass platform where the player stands
      *   Z > 4   water with sand floor
      */
-    private static void ensureSceneBuilt(ServerWorld scene) {
+    private static void ensureSceneBuilt(ServerWorld scene, BlockPos sceneOrigin) {
         if (sceneBuilt) return;
         int radius = 20;
 
         for (int x = -radius; x <= radius; x++) {
             for (int z = -radius; z <= radius; z++) {
-                BlockPos base = PLATFORM_ORIGIN.add(x, 0, z);
+                BlockPos base = sceneOrigin.add(x, 0, z);
 
                 if (z > 4) {
                     // Sea
@@ -250,13 +274,13 @@ public class ModeManager {
 
         // Small wooden jetty pointing out toward the sea (cosmetic, walkable in Adventure).
         for (int dz = 1; dz <= 5; dz++) {
-            BlockPos plank = PLATFORM_ORIGIN.add(0, 0, dz);
+            BlockPos plank = sceneOrigin.add(0, 0, dz);
             scene.setBlockState(plank, Blocks.OAK_PLANKS.getDefaultState());
         }
         // Fence posts on either side of the jetty for detail.
         for (int dz = 1; dz <= 4; dz += 3) {
-            scene.setBlockState(PLATFORM_ORIGIN.add(-1, 0, dz), Blocks.OAK_FENCE.getDefaultState());
-            scene.setBlockState(PLATFORM_ORIGIN.add( 1, 0, dz), Blocks.OAK_FENCE.getDefaultState());
+            scene.setBlockState(sceneOrigin.add(-1, 0, dz), Blocks.OAK_FENCE.getDefaultState());
+            scene.setBlockState(sceneOrigin.add( 1, 0, dz), Blocks.OAK_FENCE.getDefaultState());
         }
 
         sceneBuilt = true;

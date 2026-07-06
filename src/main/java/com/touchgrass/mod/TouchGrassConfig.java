@@ -49,10 +49,10 @@ public class TouchGrassConfig {
 
     // -------------------------------------------------------------------------
 
-    public static final TouchGrassConfig INSTANCE = load();
-
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final Path FILE = Path.of("config", "touchgrass", "config.json");
+
+    public static final TouchGrassConfig INSTANCE = load();
 
     private static TouchGrassConfig load() {
         if (Files.exists(FILE)) {
