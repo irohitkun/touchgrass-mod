@@ -2,6 +2,9 @@ package com.touchgrass.mod.mixin;
 
 import com.touchgrass.mod.ModeManager;
 import net.minecraft.entity.passive.TameableEntity;
+import net.minecraft.entity.passive.WolfEntity;
+import net.minecraft.entity.passive.CatEntity;
+import net.minecraft.entity.passive.ParrotEntity;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
@@ -17,7 +20,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * sit-toggle — from changing their state during the break. Their vanilla
  * wander/follow/sit AI stays fully active; they just ignore player input.
  */
-@Mixin(TameableEntity.class)
+@Mixin({
+    WolfEntity.class,
+    CatEntity.class,
+    ParrotEntity.class
+})
 public class TamedInteractionMixin {
 
     @Inject(method = "interactMob", at = @At("HEAD"), cancellable = true)
