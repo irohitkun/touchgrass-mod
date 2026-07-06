@@ -1,6 +1,6 @@
 # Touch Grass Mod License
 
-**Copyright © 2026 Rohit. All rights reserved.**
+**Copyright © 2026 Rohit Seeramsetti. All rights reserved.**
 
 This license applies to the **Touch Grass Mod**, including its source code, compiled binaries, and original assets, collectively referred to as the **Software**.
 
