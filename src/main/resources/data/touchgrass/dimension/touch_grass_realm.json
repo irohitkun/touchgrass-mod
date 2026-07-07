@@ -1,26 +1,11 @@
 {
   "type": "touchgrass:touch_grass_dimension_type",
   "generator": {
-    "type": "minecraft:flat",
-    "settings": {
-      "biome": "minecraft:the_void",
-      "features": false,
-      "lakes": false,
-      "layers": [
-        {
-          "block": "minecraft:bedrock",
-          "height": 1
-        },
-        {
-          "block": "minecraft:dirt",
-          "height": 3
-        },
-        {
-          "block": "minecraft:grass_block",
-          "height": 1
-        }
-      ],
-      "structure_overrides": []
+    "type": "minecraft:noise",
+    "settings": "minecraft:overworld",
+    "biome_source": {
+      "type": "minecraft:fixed",
+      "biome": "minecraft:plains"
     }
   }
 }

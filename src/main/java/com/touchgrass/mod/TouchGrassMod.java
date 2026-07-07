@@ -46,6 +46,10 @@ public class TouchGrassMod implements ModInitializer {
             ServerLifecycleEvents.SERVER_STOPPING.register(server -> PlaytimeStore.save());
         }
 
+        ServerLifecycleEvents.SERVER_STOPPED.register(server ->
+                ModeManager.resetServerState()
+        );
+
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             ServerPlayerEntity player = handler.getPlayer();
 
@@ -65,6 +69,8 @@ public class TouchGrassMod implements ModInitializer {
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             TouchGrassConfig cfg = TouchGrassConfig.INSTANCE;
+
+            ModeManager.tickScene(server);
 
             for (ServerPlayerEntity player : server.getPlayerManager().getPlayerList()) {
                 UUID id = player.getUuid();

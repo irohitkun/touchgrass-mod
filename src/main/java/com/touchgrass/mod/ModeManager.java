@@ -47,8 +47,64 @@ public class ModeManager {
     // anything a player has built because this dimension is only for this purpose.
 
     private static BlockPos getSceneOrigin(ServerWorld scene) {
-        // Deterministic scene origin for the custom flat Touch Grass realm.
-        return new BlockPos(0, -59, 0);
+        /*
+         * Search generated terrain in an expanding square around the origin.
+         * Candidate chunks are loaded before querying their heightmaps.
+         */
+        for (int radius = 0; radius <= 256; radius += 16) {
+
+            for (int x = -radius; x <= radius; x += 16) {
+                for (int z = -radius; z <= radius; z += 16) {
+
+                    // Only inspect the outer ring for this radius.
+                    if (radius > 0
+                            && Math.abs(x) != radius
+                            && Math.abs(z) != radius) {
+                        continue;
+                    }
+
+                    // Force the candidate chunk to generate/load before
+                    // consulting its heightmap.
+                    scene.getChunk(x >> 4, z >> 4);
+
+                    int y = scene.getTopY(
+                            Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
+                            x,
+                            z
+                    );
+
+                    BlockPos feet = new BlockPos(x, y, z);
+                    BlockPos ground = feet.down();
+
+                    boolean solidGround =
+                            !scene.getBlockState(ground).isAir()
+                            && !scene.getBlockState(ground).isOf(Blocks.WATER)
+                            && !scene.getBlockState(ground).isOf(Blocks.LAVA);
+
+                    boolean clearFeet =
+                            scene.getBlockState(feet).isAir();
+
+                    boolean clearHead =
+                            scene.getBlockState(feet.up()).isAir();
+
+                    if (solidGround && clearFeet && clearHead) {
+                        System.out.println(
+                                "[touchgrass] Found safe natural surface at "
+                                        + feet
+                                        + " ground="
+                                        + scene.getBlockState(ground)
+                        );
+
+                        return feet;
+                    }
+                }
+            }
+        }
+
+        throw new IllegalStateException(
+                "[touchgrass] Could not find safe natural terrain "
+                        + "within 256 blocks of the realm origin."
+        );
     }
 
     private static final int  TICKS_PER_MINUTE = 20 * 60;
@@ -111,18 +167,11 @@ public class ModeManager {
         // Find the generated terrain surface before building the scene.
         BlockPos sceneOrigin = getSceneOrigin(scene);
 
-        System.out.println("[touchgrass] SPAWN CHECK origin=" + sceneOrigin
-                + " ground=" + scene.getBlockState(sceneOrigin.down())
-                + " feet=" + scene.getBlockState(sceneOrigin)
-                + " head=" + scene.getBlockState(sceneOrigin.up()));
-        System.out.println("[touchgrass] DEBUG sceneOrigin = " + sceneOrigin
-                + ", bottomY = " + scene.getBottomY()
-                + ", topY = " + scene.getTopYInclusive());
-        ensureSceneBuilt(scene, sceneOrigin);
+        // ensureSceneBuilt(scene, sceneOrigin);
 
         // Lock clear weather for the duration — no rain breaking the mood.
         scene.setWeather(0, 6000 * 20, false, false);
-        scene.setTimeOfDay(11000L);
+        scene.setTimeOfDay(11500L);
 
         // Face the player west toward the sunset.
         player.teleport(scene,
@@ -167,21 +216,45 @@ public class ModeManager {
                 SoundEvents.AMBIENT_UNDERWATER_ENTER, SoundCategory.AMBIENT, 0.5F, 1.0F);
     }
 
+    private static boolean sunsetHalfSpeedToggle = false;
+    private static long sceneTime = 11500L;
+
+    public static void tickScene(net.minecraft.server.MinecraftServer server) {
+        boolean hasActivePlayer = server.getPlayerManager()
+                .getPlayerList()
+                .stream()
+                .anyMatch(ModeManager::isInForcedMode);
+
+        if (!hasActivePlayer) {
+            sunsetHalfSpeedToggle = false;
+            return;
+        }
+
+        sunsetHalfSpeedToggle = !sunsetHalfSpeedToggle;
+
+        // Advance only every second server tick: 0.5x normal speed.
+        if (!sunsetHalfSpeedToggle) {
+            return;
+        }
+
+        ServerWorld scene = server.getWorld(TOUCH_GRASS_DIMENSION);
+        if (scene == null) {
+            return;
+        }
+
+        if (sceneTime < 12500L) {
+            sceneTime++;
+        }
+
+        scene.setTimeOfDay(sceneTime);
+    }
+
     public static void tickForcedMode(ServerPlayerEntity player) {
         UUID id = player.getUuid();
         int left = remainingTicks.getOrDefault(id, 0) - 1;
         remainingTicks.put(id, left);
 
         ServerWorld scene = player.getServerWorld();
-
-        // Advance the sunset at half normal speed and stop at 12000 ticks.
-        if (left > 0 && left % 2 == 0) {
-            long currentTime = scene.getTimeOfDay() % 24000L;
-
-            if (currentTime < 12000L) {
-                scene.setTimeOfDay(scene.getTimeOfDay() + 1L);
-            }
-        }
 
         // Gentle water splash every ~15 s to reinforce the seaside ambience.
         if (left % (20 * 15) == 0 && left > 0) {
@@ -222,7 +295,7 @@ public class ModeManager {
 
     public static void handleJoin(ServerPlayerEntity player) {
         UUID id = player.getUuid();
-        PlayerState state = saved.remove(id);
+        PlayerState state = saved.get(id);
 
         if (state == null) {
             return;
@@ -236,23 +309,33 @@ public class ModeManager {
 
         ServerWorld returnWorld = player.getServer().getWorld(key);
 
-        if (returnWorld != null) {
-            player.teleport(
-                    returnWorld,
-                    state.x(),
-                    state.y(),
-                    state.z(),
-                    Collections.emptySet(),
-                    state.yaw(),
-                    state.pitch(),
+        if (returnWorld == null) {
+            player.sendMessage(
+                    Text.literal(
+                            "§c[Touch Grass] §fCould not restore your previous dimension. " +
+                            "Recovery state has been preserved."
+                    ),
                     false
             );
+            return;
         }
+
+        player.teleport(
+                returnWorld,
+                state.x(),
+                state.y(),
+                state.z(),
+                Collections.emptySet(),
+                state.yaw(),
+                state.pitch(),
+                false
+        );
 
         player.changeGameMode(state.mode());
         player.removeCommandTag(MODE_TAG);
         setHudHidden(player, false);
 
+        saved.remove(id);
         remainingTicks.remove(id);
         golemLineIndex.remove(id);
 
@@ -297,6 +380,17 @@ public class ModeManager {
                 Text.literal("§a[Touch Grass] §fWelcome back. Hope that helped."), false);
     }
 
+    public static void resetServerState() {
+        saved.clear();
+        remainingTicks.clear();
+        spawned.clear();
+        golemLineIndex.clear();
+
+        sceneBuilt = false;
+        sunsetHalfSpeedToggle = false;
+        sceneTime = 11500L;
+    }
+
     // -------------------------------------------------------------------------
     // Scene construction
     // -------------------------------------------------------------------------
@@ -319,7 +413,7 @@ public class ModeManager {
     ) {
         if (sceneBuilt) return;
 
-        int radius = 32;
+        int radius = 42;
         int groundY = sceneOrigin.getY() - 1;
 
         for (int x = -radius; x <= radius; x++) {
@@ -331,115 +425,125 @@ public class ModeManager {
                         sceneOrigin.getZ() + z
                 );
 
-                // Curved coastline. Negative X is west, toward the sunset.
+                // Curved western shoreline facing the sunset.
                 double coastX =
-                        -6.0
-                        + Math.sin(z * 0.20) * 2.2
-                        + Math.sin(z * 0.07) * 1.5;
+                        -7.0
+                        + Math.sin(z * 0.18) * 2.2
+                        + Math.sin(z * 0.065) * 1.4;
 
-                double distanceIntoSea = coastX - x;
+                // Peninsula narrows toward the east and has irregular edges.
+                double eastProgress = Math.max(0.0, x + 4.0);
 
-                // Clear enough vertical space for players and mobs.
+                double halfWidth =
+                        25.0
+                        - eastProgress * 0.30
+                        + Math.sin(x * 0.17) * 2.0
+                        + Math.sin(x * 0.07) * 1.5;
+
+                halfWidth = Math.max(7.0, halfWidth);
+
+                double northSouthNoise =
+                        Math.sin(x * 0.13 + z * 0.08) * 1.8
+                        + Math.sin(z * 0.21) * 1.2;
+
+                boolean insidePeninsula =
+                        x >= coastX
+                        && Math.abs(z + northSouthNoise) < halfWidth
+                        && x < 38;
+
+                double distanceFromCoast = x - coastX;
+
+                // Clear space above every edited block.
                 scene.setBlockState(ground.up(), Blocks.AIR.getDefaultState());
                 scene.setBlockState(ground.up(2), Blocks.AIR.getDefaultState());
                 scene.setBlockState(ground.up(3), Blocks.AIR.getDefaultState());
 
-                if (distanceIntoSea > 0.0) {
-
-                    int depth;
-
-                    if (distanceIntoSea < 3.0) {
-                        depth = 1;
-                    } else if (distanceIntoSea < 7.0) {
-                        depth = 2;
-                    } else {
-                        depth = 3;
-                    }
-
+                if (!insidePeninsula) {
+                    // Restore ocean surface in the edited footprint.
                     scene.setBlockState(
                             ground,
                             Blocks.WATER.getDefaultState()
                     );
 
-                    for (int d = 1; d < depth; d++) {
+                    scene.setBlockState(
+                            ground.down(),
+                            Blocks.WATER.getDefaultState()
+                    );
+
+                    scene.setBlockState(
+                            ground.down(2),
+                            Blocks.SAND.getDefaultState()
+                    );
+
+                    scene.setBlockState(
+                            ground.down(3),
+                            Blocks.SANDSTONE.getDefaultState()
+                    );
+
+                    continue;
+                }
+
+                if (distanceFromCoast < 4.0) {
+                    // Curved sandy beach.
+                    scene.setBlockState(
+                            ground,
+                            Blocks.SAND.getDefaultState()
+                    );
+
+                    scene.setBlockState(
+                            ground.down(),
+                            Blocks.SAND.getDefaultState()
+                    );
+
+                    scene.setBlockState(
+                            ground.down(2),
+                            Blocks.SANDSTONE.getDefaultState()
+                    );
+
+                    continue;
+                }
+
+                // Inland grassland.
+                scene.setBlockState(
+                        ground,
+                        Blocks.GRASS_BLOCK.getDefaultState()
+                );
+
+                scene.setBlockState(
+                        ground.down(),
+                        Blocks.DIRT.getDefaultState()
+                );
+
+                scene.setBlockState(
+                        ground.down(2),
+                        Blocks.DIRT.getDefaultState()
+                );
+
+                int hash = Math.abs(
+                        x * 73428767
+                        ^ z * 912931
+                );
+
+                boolean spawnClearing =
+                        Math.abs(x) <= 7
+                        && Math.abs(z) <= 7;
+
+                if (!spawnClearing) {
+                    if (hash % 17 == 0) {
                         scene.setBlockState(
-                                ground.down(d),
-                                Blocks.WATER.getDefaultState()
+                                ground.up(),
+                                Blocks.POPPY.getDefaultState()
                         );
-                    }
-
-                    BlockPos seaFloor = ground.down(depth);
-
-                    scene.setBlockState(
-                            seaFloor,
-                            Blocks.SAND.getDefaultState()
-                    );
-
-                    scene.setBlockState(
-                            seaFloor.down(),
-                            Blocks.SANDSTONE.getDefaultState()
-                    );
-
-                } else if (distanceIntoSea > -3.5) {
-
-                    scene.setBlockState(
-                            ground,
-                            Blocks.SAND.getDefaultState()
-                    );
-
-                    scene.setBlockState(
-                            ground.down(),
-                            Blocks.SAND.getDefaultState()
-                    );
-
-                    scene.setBlockState(
-                            ground.down(2),
-                            Blocks.SANDSTONE.getDefaultState()
-                    );
-
-                } else {
-
-                    scene.setBlockState(
-                            ground,
-                            Blocks.GRASS_BLOCK.getDefaultState()
-                    );
-
-                    scene.setBlockState(
-                            ground.down(),
-                            Blocks.DIRT.getDefaultState()
-                    );
-
-                    scene.setBlockState(
-                            ground.down(2),
-                            Blocks.DIRT.getDefaultState()
-                    );
-
-                    int hash = Math.abs(
-                            x * 73428767
-                            ^ z * 912931
-                    );
-
-                    boolean spawnClearing =
-                            Math.abs(x) <= 7
-                            && Math.abs(z) <= 7;
-
-                    if (!spawnClearing) {
-                        if (hash % 17 == 0) {
-                            scene.setBlockState(
-                                    ground.up(),
-                                    Blocks.POPPY.getDefaultState()
-                            );
-                        } else if (hash % 23 == 0) {
-                            scene.setBlockState(
-                                    ground.up(),
-                                    Blocks.DANDELION.getDefaultState()
-                            );
-                        } else if (hash % 7 == 0) {
-                            scene.setBlockState(
-                                    ground.up(),
-                                    Blocks.SHORT_GRASS.getDefaultState()
-                            );
-                        }
+                    } else if (hash % 23 == 0) {
+                        scene.setBlockState(
+                                ground.up(),
+                                Blocks.DANDELION.getDefaultState()
+                        );
+                    } else if (hash % 7 == 0) {
+                        scene.setBlockState(
+                                ground.up(),
+                                Blocks.SHORT_GRASS.getDefaultState()
+                        );
                     }
                 }
             }
