@@ -11,6 +11,11 @@ import org.lwjgl.glfw.GLFW;
 public class TouchGrassClient implements ClientModInitializer {
 
     private static KeyBinding touchGrassKey;
+    private static boolean touchGrassModeActive = false;
+
+    public static boolean isTouchGrassModeActive() {
+        return touchGrassModeActive;
+    }
 
     @Override
     public void onInitializeClient() {
@@ -35,7 +40,7 @@ public class TouchGrassClient implements ClientModInitializer {
                 TouchGrassNetworking.ModeChangePayload.ID,
                 (payload, context) ->
                         context.client().execute(() ->
-                                context.client().options.hudHidden = payload.active()
+                                touchGrassModeActive = payload.active()
                         )
         );
     }

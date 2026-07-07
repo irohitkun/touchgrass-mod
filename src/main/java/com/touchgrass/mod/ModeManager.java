@@ -48,19 +48,59 @@ public class ModeManager {
     private static final BlockPos PLATFORM_ORIGIN = new BlockPos(0, 5, 0);
 
     private static BlockPos getSceneOrigin(ServerWorld scene) {
-        int x = PLATFORM_ORIGIN.getX();
-        int z = PLATFORM_ORIGIN.getZ();
+        int centerX = PLATFORM_ORIGIN.getX();
+        int centerZ = PLATFORM_ORIGIN.getZ();
+        int searchRadius = 32;
 
-        ChunkPos chunkPos = new ChunkPos(new BlockPos(x, 0, z));
-        scene.getChunk(chunkPos.x, chunkPos.z);
+        for (int radius = 0; radius <= searchRadius; radius++) {
+            for (int x = centerX - radius; x <= centerX + radius; x++) {
+                for (int z = centerZ - radius; z <= centerZ + radius; z++) {
 
-        int y = scene.getTopY(
+                    // Only inspect the outer edge of this search ring.
+                    if (radius > 0
+                            && x != centerX - radius
+                            && x != centerX + radius
+                            && z != centerZ - radius
+                            && z != centerZ + radius) {
+                        continue;
+                    }
+
+                    ChunkPos chunkPos = new ChunkPos(new BlockPos(x, 0, z));
+                    scene.getChunk(chunkPos.x, chunkPos.z);
+
+                    int y = scene.getTopY(
+                            Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
+                            x,
+                            z
+                    );
+
+                    BlockPos feet = new BlockPos(x, y, z);
+                    BlockPos ground = feet.down();
+
+                    boolean grassGround =
+                            scene.getBlockState(ground).isOf(Blocks.GRASS_BLOCK);
+
+                    boolean feetClear =
+                            scene.getBlockState(feet).isAir();
+
+                    boolean headClear =
+                            scene.getBlockState(feet.up()).isAir();
+
+                    if (grassGround && feetClear && headClear) {
+                        return feet;
+                    }
+                }
+            }
+        }
+
+        // Fallback if no ideal grass location was found nearby.
+        int fallbackY = scene.getTopY(
                 Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
-                x,
-                z
+                centerX,
+                centerZ
         );
 
-        return new BlockPos(x, y, z);
+        return new BlockPos(centerX, fallbackY, centerZ);
     }
 
     private static final int  TICKS_PER_MINUTE = 20 * 60;
@@ -111,6 +151,11 @@ public class ModeManager {
 
         // Find the generated terrain surface before building the scene.
         BlockPos sceneOrigin = getSceneOrigin(scene);
+
+        System.out.println("[touchgrass] SPAWN CHECK origin=" + sceneOrigin
+                + " ground=" + scene.getBlockState(sceneOrigin.down())
+                + " feet=" + scene.getBlockState(sceneOrigin)
+                + " head=" + scene.getBlockState(sceneOrigin.up()));
         System.out.println("[touchgrass] DEBUG sceneOrigin = " + sceneOrigin
                 + ", bottomY = " + scene.getBottomY()
                 + ", topY = " + scene.getTopYInclusive());
@@ -119,28 +164,31 @@ public class ModeManager {
         // Lock clear weather for the duration — no rain breaking the mood.
         scene.setWeather(0, 6000 * 20, false, false);
 
-        // Face the player south.
+        // Face the player west toward the sunset.
         player.teleport(scene,
                 sceneOrigin.getX() + 0.5,
                 sceneOrigin.getY(),
                 sceneOrigin.getZ() + 0.5,
                 Collections.emptySet(),
-                180F, 0F,
+                90F, 0F,
                 false);
 
         player.addCommandTag(MODE_TAG);
         player.changeGameMode(GameMode.ADVENTURE); // no block breaking/placing
         remainingTicks.put(player.getUuid(),
                 TouchGrassConfig.INSTANCE.forcedModeDurationMinutes * TICKS_PER_MINUTE);
-        golemLineIndex.put(player.getUuid(), 0);
+        golemLineIndex.put(player.getUuid(), 1);
 
-        spawnIllusionAnimals(scene, player);
-        spawnGolem(scene, player);
+        spawnIllusionAnimals(scene, player, sceneOrigin);
+        spawnGolem(scene, player, sceneOrigin);
         setHudHidden(player, true);
 
         player.sendMessage(Text.literal(
                 "§6[Touch Grass] §fOkay, that's enough. Sit here, watch the sunset, " +
                 "and hang out with the animals for a bit."), false);
+        player.networkHandler.sendPacket(
+                new net.minecraft.network.packet.s2c.play.TitleFadeS2CPacket(20, 100, 30));
+
         player.networkHandler.sendPacket(
                 new net.minecraft.network.packet.s2c.play.TitleS2CPacket(
                         Text.literal("§eTouch Grass Mode")));
@@ -152,10 +200,10 @@ public class ModeManager {
         SoundEvent music = Registries.SOUND_EVENT.get(
                 Identifier.of(TouchGrassConfig.INSTANCE.musicEventId));
         if (music == null) music = SoundEvents.MUSIC_OVERWORLD_MEADOW.value();
-        scene.playSound(null, PLATFORM_ORIGIN, music, SoundCategory.MUSIC, 1.0F, 1.0F);
+        scene.playSound(null, sceneOrigin, music, SoundCategory.MUSIC, 1.0F, 1.0F);
 
         // Gentle water ambience on entry.
-        scene.playSound(null, PLATFORM_ORIGIN,
+        scene.playSound(null, sceneOrigin,
                 SoundEvents.AMBIENT_UNDERWATER_ENTER, SoundCategory.AMBIENT, 0.5F, 1.0F);
     }
 
@@ -290,7 +338,11 @@ public class ModeManager {
     // Animal behaviour
     // -------------------------------------------------------------------------
 
-    private static void spawnIllusionAnimals(ServerWorld world, ServerPlayerEntity player) {
+    private static void spawnIllusionAnimals(
+            ServerWorld world,
+            ServerPlayerEntity player,
+            BlockPos sceneOrigin
+    ) {
         List<net.minecraft.entity.Entity> list =
                 spawned.computeIfAbsent(player.getUuid(), k -> new ArrayList<>());
 
@@ -304,10 +356,19 @@ public class ModeManager {
         for (var mob : List.of(dog, cat, parrot)) {
             if (mob == null) { i++; continue; }
             int[] off = offsets[i];
+
+            int spawnX = sceneOrigin.getX() + off[0];
+            int spawnZ = sceneOrigin.getZ() + off[1];
+            int spawnY = world.getTopY(
+                    Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
+                    spawnX,
+                    spawnZ
+            );
+
             mob.refreshPositionAndAngles(
-                    PLATFORM_ORIGIN.getX() + off[0],
-                    PLATFORM_ORIGIN.getY() + 1,
-                    PLATFORM_ORIGIN.getZ() + off[1],
+                    spawnX + 0.5,
+                    spawnY,
+                    spawnZ + 0.5,
                     (float) RANDOM.nextInt(360), 0F);
             mob.addCommandTag(ILLUSION_TAG);
             if (mob instanceof TameableEntity tameable) {
@@ -371,13 +432,25 @@ public class ModeManager {
         }
     }
 
-    private static void spawnGolem(ServerWorld world, ServerPlayerEntity player) {
+    private static void spawnGolem(
+            ServerWorld world,
+            ServerPlayerEntity player,
+            BlockPos sceneOrigin
+    ) {
         IronGolemEntity golem = EntityType.IRON_GOLEM.create(world, SpawnReason.TRIGGERED);
         if (golem == null) return;
+        int spawnX = sceneOrigin.getX() + 1;
+        int spawnZ = sceneOrigin.getZ() - 3;
+        int spawnY = world.getTopY(
+                Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
+                spawnX,
+                spawnZ
+        );
+
         golem.refreshPositionAndAngles(
-                PLATFORM_ORIGIN.getX() + 1,
-                PLATFORM_ORIGIN.getY() + 1,
-                PLATFORM_ORIGIN.getZ() - 3,
+                spawnX + 0.5,
+                spawnY,
+                spawnZ + 0.5,
                 180F, 0F);
         golem.setCustomName(Text.literal("§2Grass Golem"));
         golem.setCustomNameVisible(true);
