@@ -44,12 +44,24 @@ public class TouchGrassMod implements ModInitializer {
         if (TouchGrassConfig.INSTANCE.persistPlaytime) {
             ServerLifecycleEvents.SERVER_STARTED.register(server -> PlaytimeStore.load());
             ServerLifecycleEvents.SERVER_STOPPING.register(server -> PlaytimeStore.save());
-            ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
-                    ticksPlayed.put(
-                            handler.getPlayer().getUuid(),
-                            PlaytimeStore.getTicks(handler.getPlayer().getUuid())
-                    ));
         }
+
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+            ServerPlayerEntity player = handler.getPlayer();
+
+            if (TouchGrassConfig.INSTANCE.persistPlaytime) {
+                ticksPlayed.put(
+                        player.getUuid(),
+                        PlaytimeStore.getTicks(player.getUuid())
+                );
+            }
+
+            ModeManager.handleJoin(player);
+        });
+
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
+                ModeManager.handleDisconnect(handler.getPlayer())
+        );
 
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             TouchGrassConfig cfg = TouchGrassConfig.INSTANCE;

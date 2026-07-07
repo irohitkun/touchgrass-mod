@@ -45,62 +45,10 @@ public class ModeManager {
 
     // Scene origin in the dedicated dimension. Fixed coords never collide with
     // anything a player has built because this dimension is only for this purpose.
-    private static final BlockPos PLATFORM_ORIGIN = new BlockPos(0, 5, 0);
 
     private static BlockPos getSceneOrigin(ServerWorld scene) {
-        int centerX = PLATFORM_ORIGIN.getX();
-        int centerZ = PLATFORM_ORIGIN.getZ();
-        int searchRadius = 32;
-
-        for (int radius = 0; radius <= searchRadius; radius++) {
-            for (int x = centerX - radius; x <= centerX + radius; x++) {
-                for (int z = centerZ - radius; z <= centerZ + radius; z++) {
-
-                    // Only inspect the outer edge of this search ring.
-                    if (radius > 0
-                            && x != centerX - radius
-                            && x != centerX + radius
-                            && z != centerZ - radius
-                            && z != centerZ + radius) {
-                        continue;
-                    }
-
-                    ChunkPos chunkPos = new ChunkPos(new BlockPos(x, 0, z));
-                    scene.getChunk(chunkPos.x, chunkPos.z);
-
-                    int y = scene.getTopY(
-                            Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
-                            x,
-                            z
-                    );
-
-                    BlockPos feet = new BlockPos(x, y, z);
-                    BlockPos ground = feet.down();
-
-                    boolean grassGround =
-                            scene.getBlockState(ground).isOf(Blocks.GRASS_BLOCK);
-
-                    boolean feetClear =
-                            scene.getBlockState(feet).isAir();
-
-                    boolean headClear =
-                            scene.getBlockState(feet.up()).isAir();
-
-                    if (grassGround && feetClear && headClear) {
-                        return feet;
-                    }
-                }
-            }
-        }
-
-        // Fallback if no ideal grass location was found nearby.
-        int fallbackY = scene.getTopY(
-                Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
-                centerX,
-                centerZ
-        );
-
-        return new BlockPos(centerX, fallbackY, centerZ);
+        // Deterministic scene origin for the custom flat Touch Grass realm.
+        return new BlockPos(0, -59, 0);
     }
 
     private static final int  TICKS_PER_MINUTE = 20 * 60;
@@ -111,8 +59,15 @@ public class ModeManager {
     private static final Map<UUID, Integer>                          remainingTicks = new HashMap<>();
     private static final Map<UUID, List<net.minecraft.entity.Entity>> spawned        = new HashMap<>();
 
-    private record PlayerState(BlockPos pos, float yaw, float pitch,
-                                String dimension, GameMode mode) {}
+    private record PlayerState(
+            double x,
+            double y,
+            double z,
+            float yaw,
+            float pitch,
+            String dimension,
+            GameMode mode
+    ) {}
 
     // -- Golem dialogue lines shown on the chat rail during the break ----------
     private static final String[] GOLEM_LINES = {
@@ -134,13 +89,6 @@ public class ModeManager {
     public static void enterForcedMode(ServerPlayerEntity player) {
         if (isInForcedMode(player)) return;
 
-        ServerWorld fromWorld = player.getServerWorld();
-        saved.put(player.getUuid(), new PlayerState(
-                player.getBlockPos(),
-                player.getYaw(), player.getPitch(),
-                fromWorld.getRegistryKey().getValue().toString(),
-                player.interactionManager.getGameMode()));
-
         ServerWorld scene = player.getServer().getWorld(TOUCH_GRASS_DIMENSION);
         if (scene == null) {
             player.sendMessage(Text.literal(
@@ -148,6 +96,17 @@ public class ModeManager {
                     "under data/touchgrass/dimension* are packaged into the jar."), false);
             return;
         }
+
+        ServerWorld fromWorld = player.getServerWorld();
+        saved.put(player.getUuid(), new PlayerState(
+                player.getX(),
+                player.getY(),
+                player.getZ(),
+                player.getYaw(),
+                player.getPitch(),
+                fromWorld.getRegistryKey().getValue().toString(),
+                player.interactionManager.getGameMode()));
+
 
         // Find the generated terrain surface before building the scene.
         BlockPos sceneOrigin = getSceneOrigin(scene);
@@ -159,10 +118,11 @@ public class ModeManager {
         System.out.println("[touchgrass] DEBUG sceneOrigin = " + sceneOrigin
                 + ", bottomY = " + scene.getBottomY()
                 + ", topY = " + scene.getTopYInclusive());
-        // ensureSceneBuilt temporarily disabled while testing natural terrain
+        ensureSceneBuilt(scene, sceneOrigin);
 
         // Lock clear weather for the duration — no rain breaking the mood.
         scene.setWeather(0, 6000 * 20, false, false);
+        scene.setTimeOfDay(11000L);
 
         // Face the player west toward the sunset.
         player.teleport(scene,
@@ -214,6 +174,15 @@ public class ModeManager {
 
         ServerWorld scene = player.getServerWorld();
 
+        // Advance the sunset at half normal speed and stop at 12000 ticks.
+        if (left > 0 && left % 2 == 0) {
+            long currentTime = scene.getTimeOfDay() % 24000L;
+
+            if (currentTime < 12000L) {
+                scene.setTimeOfDay(scene.getTimeOfDay() + 1L);
+            }
+        }
+
         // Gentle water splash every ~15 s to reinforce the seaside ambience.
         if (left % (20 * 15) == 0 && left > 0) {
             scene.playSound(null, player.getBlockPos(),
@@ -238,6 +207,63 @@ public class ModeManager {
         }
     }
 
+    public static void handleDisconnect(ServerPlayerEntity player) {
+        UUID id = player.getUuid();
+
+        // Preserve saved return state for reconnect recovery.
+        remainingTicks.remove(id);
+        golemLineIndex.remove(id);
+
+        List<net.minecraft.entity.Entity> mobs = spawned.remove(id);
+        if (mobs != null) {
+            mobs.forEach(net.minecraft.entity.Entity::discard);
+        }
+    }
+
+    public static void handleJoin(ServerPlayerEntity player) {
+        UUID id = player.getUuid();
+        PlayerState state = saved.remove(id);
+
+        if (state == null) {
+            return;
+        }
+
+        RegistryKey<net.minecraft.world.World> key =
+                RegistryKey.of(
+                        RegistryKeys.WORLD,
+                        Identifier.of(state.dimension())
+                );
+
+        ServerWorld returnWorld = player.getServer().getWorld(key);
+
+        if (returnWorld != null) {
+            player.teleport(
+                    returnWorld,
+                    state.x(),
+                    state.y(),
+                    state.z(),
+                    Collections.emptySet(),
+                    state.yaw(),
+                    state.pitch(),
+                    false
+            );
+        }
+
+        player.changeGameMode(state.mode());
+        player.removeCommandTag(MODE_TAG);
+        setHudHidden(player, false);
+
+        remainingTicks.remove(id);
+        golemLineIndex.remove(id);
+
+        player.sendMessage(
+                Text.literal(
+                        "§a[Touch Grass] §fYour interrupted break session was cleaned up."
+                ),
+                false
+        );
+    }
+
     public static void exitForcedMode(ServerPlayerEntity player) {
         UUID id = player.getUuid();
         PlayerState state = saved.remove(id);
@@ -253,11 +279,12 @@ public class ModeManager {
             ServerWorld returnWorld = player.getServer().getWorld(key);
             if (returnWorld != null) {
                 player.teleport(returnWorld,
-                        state.pos().getX() + 0.5,
-                        state.pos().getY(),
-                        state.pos().getZ() + 0.5,
+                        state.x(),
+                        state.y(),
+                        state.z(),
                         Collections.emptySet(),
-                        state.yaw(), state.pitch(),
+                        state.yaw(),
+                        state.pitch(),
                         false);
             }
             player.changeGameMode(state.mode());
@@ -277,58 +304,145 @@ public class ModeManager {
     private static boolean sceneBuilt = false;
 
     /**
-     * Builds the sunset plains-and-sea scene once. The dimension stays empty
-     * superflat otherwise, so this small footprint never collides with anything.
+     * Builds the deterministic sunset coast scene once.
      *
-     * Layout (south = positive Z = toward the sea):
-     *   Z < -8  grass + flowers + occasional short grass
-     *   -8..4   grass platform where the player stands
-     *   Z > 4   water with sand floor
+     * Layout:
+     *   X <= -7      shallow sea to the west
+     *   X = -6..-3   sandy shoreline
+     *   X >= -2      grassland and flowers
+     *
+     * The player spawns near the center and faces west toward the sunset.
      */
-    private static void ensureSceneBuilt(ServerWorld scene, BlockPos sceneOrigin) {
+    private static void ensureSceneBuilt(
+            ServerWorld scene,
+            BlockPos sceneOrigin
+    ) {
         if (sceneBuilt) return;
-        int radius = 20;
+
+        int radius = 32;
+        int groundY = sceneOrigin.getY() - 1;
 
         for (int x = -radius; x <= radius; x++) {
             for (int z = -radius; z <= radius; z++) {
-                BlockPos base = sceneOrigin.add(x, 0, z);
 
-                if (z > 4) {
-                    // Sea
-                    scene.setBlockState(base, Blocks.WATER.getDefaultState());
-                    scene.setBlockState(base.down(), Blocks.SAND.getDefaultState());
-                    scene.setBlockState(base.down(2), Blocks.SANDSTONE.getDefaultState());
-                } else {
-                    // Grass land
-                    scene.setBlockState(base, Blocks.GRASS_BLOCK.getDefaultState());
-                    scene.setBlockState(base.down(), Blocks.DIRT.getDefaultState());
+                BlockPos ground = new BlockPos(
+                        sceneOrigin.getX() + x,
+                        groundY,
+                        sceneOrigin.getZ() + z
+                );
 
-                    int hash = (x * 31 + z * 17) & 0x7FFFFFFF;
+                // Curved coastline. Negative X is west, toward the sunset.
+                double coastX =
+                        -6.0
+                        + Math.sin(z * 0.20) * 2.2
+                        + Math.sin(z * 0.07) * 1.5;
 
-                    if (z < -8) {
-                        // Further inland: denser flora
-                        if (hash % 5 == 0)       scene.setBlockState(base.up(), Blocks.POPPY.getDefaultState());
-                        else if (hash % 7 == 0)  scene.setBlockState(base.up(), Blocks.DANDELION.getDefaultState());
-                        else if (hash % 11 == 0) scene.setBlockState(base.up(), Blocks.SUNFLOWER.getDefaultState());
-                        else if (hash % 3 == 0)  scene.setBlockState(base.up(), Blocks.SHORT_GRASS.getDefaultState());
+                double distanceIntoSea = coastX - x;
+
+                // Clear enough vertical space for players and mobs.
+                scene.setBlockState(ground.up(), Blocks.AIR.getDefaultState());
+                scene.setBlockState(ground.up(2), Blocks.AIR.getDefaultState());
+                scene.setBlockState(ground.up(3), Blocks.AIR.getDefaultState());
+
+                if (distanceIntoSea > 0.0) {
+
+                    int depth;
+
+                    if (distanceIntoSea < 3.0) {
+                        depth = 1;
+                    } else if (distanceIntoSea < 7.0) {
+                        depth = 2;
                     } else {
-                        // Middle zone: sparser, the player can walk around
-                        if (hash % 9 == 0)       scene.setBlockState(base.up(), Blocks.SHORT_GRASS.getDefaultState());
-                        else if (hash % 13 == 0) scene.setBlockState(base.up(), Blocks.POPPY.getDefaultState());
+                        depth = 3;
+                    }
+
+                    scene.setBlockState(
+                            ground,
+                            Blocks.WATER.getDefaultState()
+                    );
+
+                    for (int d = 1; d < depth; d++) {
+                        scene.setBlockState(
+                                ground.down(d),
+                                Blocks.WATER.getDefaultState()
+                        );
+                    }
+
+                    BlockPos seaFloor = ground.down(depth);
+
+                    scene.setBlockState(
+                            seaFloor,
+                            Blocks.SAND.getDefaultState()
+                    );
+
+                    scene.setBlockState(
+                            seaFloor.down(),
+                            Blocks.SANDSTONE.getDefaultState()
+                    );
+
+                } else if (distanceIntoSea > -3.5) {
+
+                    scene.setBlockState(
+                            ground,
+                            Blocks.SAND.getDefaultState()
+                    );
+
+                    scene.setBlockState(
+                            ground.down(),
+                            Blocks.SAND.getDefaultState()
+                    );
+
+                    scene.setBlockState(
+                            ground.down(2),
+                            Blocks.SANDSTONE.getDefaultState()
+                    );
+
+                } else {
+
+                    scene.setBlockState(
+                            ground,
+                            Blocks.GRASS_BLOCK.getDefaultState()
+                    );
+
+                    scene.setBlockState(
+                            ground.down(),
+                            Blocks.DIRT.getDefaultState()
+                    );
+
+                    scene.setBlockState(
+                            ground.down(2),
+                            Blocks.DIRT.getDefaultState()
+                    );
+
+                    int hash = Math.abs(
+                            x * 73428767
+                            ^ z * 912931
+                    );
+
+                    boolean spawnClearing =
+                            Math.abs(x) <= 7
+                            && Math.abs(z) <= 7;
+
+                    if (!spawnClearing) {
+                        if (hash % 17 == 0) {
+                            scene.setBlockState(
+                                    ground.up(),
+                                    Blocks.POPPY.getDefaultState()
+                            );
+                        } else if (hash % 23 == 0) {
+                            scene.setBlockState(
+                                    ground.up(),
+                                    Blocks.DANDELION.getDefaultState()
+                            );
+                        } else if (hash % 7 == 0) {
+                            scene.setBlockState(
+                                    ground.up(),
+                                    Blocks.SHORT_GRASS.getDefaultState()
+                            );
+                        }
                     }
                 }
             }
-        }
-
-        // Small wooden jetty pointing out toward the sea (cosmetic, walkable in Adventure).
-        for (int dz = 1; dz <= 5; dz++) {
-            BlockPos plank = sceneOrigin.add(0, 0, dz);
-            scene.setBlockState(plank, Blocks.OAK_PLANKS.getDefaultState());
-        }
-        // Fence posts on either side of the jetty for detail.
-        for (int dz = 1; dz <= 4; dz += 3) {
-            scene.setBlockState(sceneOrigin.add(-1, 0, dz), Blocks.OAK_FENCE.getDefaultState());
-            scene.setBlockState(sceneOrigin.add( 1, 0, dz), Blocks.OAK_FENCE.getDefaultState());
         }
 
         sceneBuilt = true;
@@ -344,50 +458,122 @@ public class ModeManager {
             BlockPos sceneOrigin
     ) {
         List<net.minecraft.entity.Entity> list =
-                spawned.computeIfAbsent(player.getUuid(), k -> new ArrayList<>());
+                spawned.computeIfAbsent(
+                        player.getUuid(),
+                        k -> new ArrayList<>()
+                );
 
-        // Spread animals out around the player so they can wander freely.
-        WolfEntity   dog    = EntityType.WOLF.create(world, SpawnReason.TRIGGERED);
-        CatEntity    cat    = EntityType.CAT.create(world, SpawnReason.TRIGGERED);
-        ParrotEntity parrot = EntityType.PARROT.create(world, SpawnReason.TRIGGERED);
+        // Fixed safe positions on the inland grass side of the scene.
+        int[][] dogOffsets = {
+                {4, -4},
+                {7, 2},
+                {10, -6}
+        };
 
-        int[][] offsets = {{-3, 2}, {3, 2}, {0, -3}};
-        int i = 0;
-        for (var mob : List.of(dog, cat, parrot)) {
-            if (mob == null) { i++; continue; }
-            int[] off = offsets[i];
+        int[][] catOffsets = {
+                {3, 4},
+                {8, 6},
+                {11, 1}
+        };
 
-            int spawnX = sceneOrigin.getX() + off[0];
-            int spawnZ = sceneOrigin.getZ() + off[1];
-            int spawnY = world.getTopY(
-                    Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
-                    spawnX,
-                    spawnZ
-            );
+        int[][] parrotOffsets = {
+                {5, -7},
+                {9, -2},
+                {12, 5},
+                {6, 8}
+        };
 
-            mob.refreshPositionAndAngles(
-                    spawnX + 0.5,
-                    spawnY,
-                    spawnZ + 0.5,
-                    (float) RANDOM.nextInt(360), 0F);
-            mob.addCommandTag(ILLUSION_TAG);
-            if (mob instanceof TameableEntity tameable) {
-                // Cosmetic tame — bypasses the feeding mechanic so it persists
-                // exactly as set and vanishes cleanly when the mode ends.
-                tameable.setOwnerUuid(player.getUuid());
-                tameable.setSitting(false);
+        for (int[] off : dogOffsets) {
+            WolfEntity dog =
+                    EntityType.WOLF.create(world, SpawnReason.TRIGGERED);
+
+            if (dog != null) {
+                prepareAnimal(
+                        dog,
+                        world,
+                        player,
+                        sceneOrigin,
+                        off[0],
+                        off[1],
+                        list
+                );
             }
-            world.spawnEntity(mob);
-            list.add(mob);
-            i++;
         }
 
-        // Have each animal immediately drift toward the player at a relaxed walk.
+        for (int[] off : catOffsets) {
+            CatEntity cat =
+                    EntityType.CAT.create(world, SpawnReason.TRIGGERED);
+
+            if (cat != null) {
+                prepareAnimal(
+                        cat,
+                        world,
+                        player,
+                        sceneOrigin,
+                        off[0],
+                        off[1],
+                        list
+                );
+            }
+        }
+
+        for (int[] off : parrotOffsets) {
+            ParrotEntity parrot =
+                    EntityType.PARROT.create(world, SpawnReason.TRIGGERED);
+
+            if (parrot != null) {
+                prepareAnimal(
+                        parrot,
+                        world,
+                        player,
+                        sceneOrigin,
+                        off[0],
+                        off[1],
+                        list
+                );
+            }
+        }
+
+        // Let the animals begin moving gently toward the player.
         for (var entity : list) {
             if (entity instanceof net.minecraft.entity.mob.MobEntity mob) {
                 mob.getNavigation().startMovingTo(player, 0.5);
             }
         }
+    }
+
+    private static void prepareAnimal(
+            TameableEntity animal,
+            ServerWorld world,
+            ServerPlayerEntity player,
+            BlockPos sceneOrigin,
+            int offsetX,
+            int offsetZ,
+            List<net.minecraft.entity.Entity> list
+    ) {
+        double spawnX =
+                sceneOrigin.getX() + offsetX + 0.5;
+
+        double spawnY =
+                sceneOrigin.getY();
+
+        double spawnZ =
+                sceneOrigin.getZ() + offsetZ + 0.5;
+
+        animal.refreshPositionAndAngles(
+                spawnX,
+                spawnY,
+                spawnZ,
+                (float) RANDOM.nextInt(360),
+                0F
+        );
+
+        animal.addCommandTag(ILLUSION_TAG);
+        animal.setOwnerUuid(player.getUuid());
+        animal.setSitting(false);
+
+        world.spawnEntity(animal);
+        list.add(animal);
     }
 
     /**
@@ -402,6 +588,26 @@ public class ModeManager {
 
         var pick = mobs.get(RANDOM.nextInt(mobs.size()));
         if (!(pick instanceof TameableEntity tameable) || !tameable.isAlive()) return;
+
+        // Parrots stay near their scenic spawn points instead of using
+        // ground-animal navigation toward the player.
+        if (tameable instanceof ParrotEntity parrot) {
+            parrot.getNavigation().stop();
+            parrot.getLookControl().lookAt(player, 30F, 30F);
+
+            if (RANDOM.nextBoolean()) {
+                world.playSound(
+                        null,
+                        parrot.getBlockPos(),
+                        SoundEvents.ENTITY_PARROT_AMBIENT,
+                        SoundCategory.NEUTRAL,
+                        0.7F,
+                        0.9F + RANDOM.nextFloat() * 0.2F
+                );
+            }
+
+            return;
+        }
 
         double distSq = tameable.squaredDistanceTo(player);
 
@@ -441,11 +647,7 @@ public class ModeManager {
         if (golem == null) return;
         int spawnX = sceneOrigin.getX() + 1;
         int spawnZ = sceneOrigin.getZ() - 3;
-        int spawnY = world.getTopY(
-                Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
-                spawnX,
-                spawnZ
-        );
+        int spawnY = sceneOrigin.getY();
 
         golem.refreshPositionAndAngles(
                 spawnX + 0.5,
