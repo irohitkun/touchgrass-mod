@@ -2,10 +2,10 @@
   "type": "touchgrass:touch_grass_dimension_type",
   "generator": {
     "type": "minecraft:noise",
-    "settings": "minecraft:overworld",
+    "settings": "touchgrass:touch_grass_realm",
     "biome_source": {
       "type": "minecraft:fixed",
-      "biome": "minecraft:plains"
+      "biome": "touchgrass:touch_grass_coast"
     }
   }
 }

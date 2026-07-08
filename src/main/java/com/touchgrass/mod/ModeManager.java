@@ -1,10 +1,10 @@
 package com.touchgrass.mod;
 
+import com.touchgrass.mod.worldgen.CoastalTerrainModifier;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.SpawnReason;
-import net.minecraft.entity.ai.goal.Goal;
 import net.minecraft.entity.passive.CatEntity;
 import net.minecraft.entity.passive.IronGolemEntity;
 import net.minecraft.entity.passive.ParrotEntity;
@@ -21,7 +21,6 @@ import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.GameMode;
 import net.minecraft.world.Heightmap;
 
@@ -48,32 +47,34 @@ public class ModeManager {
 
     private static BlockPos getSceneOrigin(ServerWorld scene) {
         /*
-         * Search generated terrain in an expanding square around the origin.
-         * Candidate chunks are loaded before querying their heightmaps.
+         * CoastalTerrainModifier has already pre-generated the spawn area and
+         * guaranteed that chunks east of chunkX=0 are grassy land.  Search
+         * outward from (8, z=0) — the centre of the safe grassland zone — for
+         * the first solid, clear-air surface block.
          */
-        for (int radius = 0; radius <= 256; radius += 16) {
+        final int SPAWN_X = 8;
 
-            for (int x = -radius; x <= radius; x += 16) {
-                for (int z = -radius; z <= radius; z += 16) {
+        for (int radius = 0; radius <= 64; radius += 4) {
+            for (int dx = -radius; dx <= radius; dx += 4) {
+                for (int dz = -radius; dz <= radius; dz += 4) {
 
-                    // Only inspect the outer ring for this radius.
+                    // Spiral outward: only visit the outer ring each iteration.
                     if (radius > 0
-                            && Math.abs(x) != radius
-                            && Math.abs(z) != radius) {
+                            && Math.abs(dx) != radius
+                            && Math.abs(dz) != radius) {
                         continue;
                     }
 
-                    // Force the candidate chunk to generate/load before
-                    // consulting its heightmap.
+                    int x = SPAWN_X + dx;
+                    int z = dz;
+
+                    // Chunks are already loaded by CoastalTerrainModifier; this
+                    // call is a fast cache hit.
                     scene.getChunk(x >> 4, z >> 4);
 
-                    int y = scene.getTopY(
-                            Heightmap.Type.MOTION_BLOCKING_NO_LEAVES,
-                            x,
-                            z
-                    );
+                    int y = scene.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, x, z);
 
-                    BlockPos feet = new BlockPos(x, y, z);
+                    BlockPos feet   = new BlockPos(x, y, z);
                     BlockPos ground = feet.down();
 
                     boolean solidGround =
@@ -81,30 +82,21 @@ public class ModeManager {
                             && !scene.getBlockState(ground).isOf(Blocks.WATER)
                             && !scene.getBlockState(ground).isOf(Blocks.LAVA);
 
-                    boolean clearFeet =
-                            scene.getBlockState(feet).isAir();
-
-                    boolean clearHead =
-                            scene.getBlockState(feet.up()).isAir();
-
-                    if (solidGround && clearFeet && clearHead) {
-                        System.out.println(
-                                "[touchgrass] Found safe natural surface at "
-                                        + feet
-                                        + " ground="
-                                        + scene.getBlockState(ground)
-                        );
-
+                    if (solidGround
+                            && scene.getBlockState(feet).isAir()
+                            && scene.getBlockState(feet.up()).isAir()) {
+                        System.out.println("[touchgrass] Spawn at " + feet
+                                + "  ground=" + scene.getBlockState(ground));
                         return feet;
                     }
                 }
             }
         }
 
-        throw new IllegalStateException(
-                "[touchgrass] Could not find safe natural terrain "
-                        + "within 256 blocks of the realm origin."
-        );
+        // Fallback: use heightmap at the expected centre.
+        int y = scene.getTopY(Heightmap.Type.MOTION_BLOCKING_NO_LEAVES, SPAWN_X, 0);
+        System.out.println("[touchgrass] Fallback spawn at (" + SPAWN_X + "," + y + ",0)");
+        return new BlockPos(SPAWN_X, y, 0);
     }
 
     private static final int  TICKS_PER_MINUTE = 20 * 60;
@@ -165,9 +157,11 @@ public class ModeManager {
 
 
         // Find the generated terrain surface before building the scene.
-        BlockPos sceneOrigin = getSceneOrigin(scene);
+        // Ensure the western ocean has been carved (once per world save).
+        CoastalTerrainModifier.ensureCoastalShape(scene);
 
-        // ensureSceneBuilt(scene, sceneOrigin);
+        // Find the generated terrain surface in the safe grass zone.
+        BlockPos sceneOrigin = getSceneOrigin(scene);
 
         // Lock clear weather for the duration — no rain breaking the mood.
         scene.setWeather(0, 6000 * 20, false, false);
@@ -386,170 +380,8 @@ public class ModeManager {
         spawned.clear();
         golemLineIndex.clear();
 
-        sceneBuilt = false;
         sunsetHalfSpeedToggle = false;
         sceneTime = 11500L;
-    }
-
-    // -------------------------------------------------------------------------
-    // Scene construction
-    // -------------------------------------------------------------------------
-
-    private static boolean sceneBuilt = false;
-
-    /**
-     * Builds the deterministic sunset coast scene once.
-     *
-     * Layout:
-     *   X <= -7      shallow sea to the west
-     *   X = -6..-3   sandy shoreline
-     *   X >= -2      grassland and flowers
-     *
-     * The player spawns near the center and faces west toward the sunset.
-     */
-    private static void ensureSceneBuilt(
-            ServerWorld scene,
-            BlockPos sceneOrigin
-    ) {
-        if (sceneBuilt) return;
-
-        int radius = 42;
-        int groundY = sceneOrigin.getY() - 1;
-
-        for (int x = -radius; x <= radius; x++) {
-            for (int z = -radius; z <= radius; z++) {
-
-                BlockPos ground = new BlockPos(
-                        sceneOrigin.getX() + x,
-                        groundY,
-                        sceneOrigin.getZ() + z
-                );
-
-                // Curved western shoreline facing the sunset.
-                double coastX =
-                        -7.0
-                        + Math.sin(z * 0.18) * 2.2
-                        + Math.sin(z * 0.065) * 1.4;
-
-                // Peninsula narrows toward the east and has irregular edges.
-                double eastProgress = Math.max(0.0, x + 4.0);
-
-                double halfWidth =
-                        25.0
-                        - eastProgress * 0.30
-                        + Math.sin(x * 0.17) * 2.0
-                        + Math.sin(x * 0.07) * 1.5;
-
-                halfWidth = Math.max(7.0, halfWidth);
-
-                double northSouthNoise =
-                        Math.sin(x * 0.13 + z * 0.08) * 1.8
-                        + Math.sin(z * 0.21) * 1.2;
-
-                boolean insidePeninsula =
-                        x >= coastX
-                        && Math.abs(z + northSouthNoise) < halfWidth
-                        && x < 38;
-
-                double distanceFromCoast = x - coastX;
-
-                // Clear space above every edited block.
-                scene.setBlockState(ground.up(), Blocks.AIR.getDefaultState());
-                scene.setBlockState(ground.up(2), Blocks.AIR.getDefaultState());
-                scene.setBlockState(ground.up(3), Blocks.AIR.getDefaultState());
-
-                if (!insidePeninsula) {
-                    // Restore ocean surface in the edited footprint.
-                    scene.setBlockState(
-                            ground,
-                            Blocks.WATER.getDefaultState()
-                    );
-
-                    scene.setBlockState(
-                            ground.down(),
-                            Blocks.WATER.getDefaultState()
-                    );
-
-                    scene.setBlockState(
-                            ground.down(2),
-                            Blocks.SAND.getDefaultState()
-                    );
-
-                    scene.setBlockState(
-                            ground.down(3),
-                            Blocks.SANDSTONE.getDefaultState()
-                    );
-
-                    continue;
-                }
-
-                if (distanceFromCoast < 4.0) {
-                    // Curved sandy beach.
-                    scene.setBlockState(
-                            ground,
-                            Blocks.SAND.getDefaultState()
-                    );
-
-                    scene.setBlockState(
-                            ground.down(),
-                            Blocks.SAND.getDefaultState()
-                    );
-
-                    scene.setBlockState(
-                            ground.down(2),
-                            Blocks.SANDSTONE.getDefaultState()
-                    );
-
-                    continue;
-                }
-
-                // Inland grassland.
-                scene.setBlockState(
-                        ground,
-                        Blocks.GRASS_BLOCK.getDefaultState()
-                );
-
-                scene.setBlockState(
-                        ground.down(),
-                        Blocks.DIRT.getDefaultState()
-                );
-
-                scene.setBlockState(
-                        ground.down(2),
-                        Blocks.DIRT.getDefaultState()
-                );
-
-                int hash = Math.abs(
-                        x * 73428767
-                        ^ z * 912931
-                );
-
-                boolean spawnClearing =
-                        Math.abs(x) <= 7
-                        && Math.abs(z) <= 7;
-
-                if (!spawnClearing) {
-                    if (hash % 17 == 0) {
-                        scene.setBlockState(
-                                ground.up(),
-                                Blocks.POPPY.getDefaultState()
-                        );
-                    } else if (hash % 23 == 0) {
-                        scene.setBlockState(
-                                ground.up(),
-                                Blocks.DANDELION.getDefaultState()
-                        );
-                    } else if (hash % 7 == 0) {
-                        scene.setBlockState(
-                                ground.up(),
-                                Blocks.SHORT_GRASS.getDefaultState()
-                        );
-                    }
-                }
-            }
-        }
-
-        sceneBuilt = true;
     }
 
     // -------------------------------------------------------------------------
